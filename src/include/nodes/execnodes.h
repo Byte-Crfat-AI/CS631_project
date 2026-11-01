@@ -1622,6 +1622,12 @@ typedef struct SeqScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
 	Size		pscan_len;		/* size of parallel heap scan descriptor */
+	/* autoindex */
+    bool        ai_active;      /* is this scan a candidate? */
+    AttrNumber  ai_attno;       /* which column */
+    int64       ai_examined;
+    int64       ai_matched;
+    bool        ai_reached_end; /* did we read the whole table? */
 } SeqScanState;
 
 /* ----------------

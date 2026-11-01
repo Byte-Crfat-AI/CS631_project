@@ -27,6 +27,7 @@
  */
 #include "postgres.h"
 
+#include "postmaster/autoindex.h"
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "executor/execScan.h"
@@ -275,6 +276,8 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 		else
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQualProject;
 	}
+	
+	autoindex_init_scan(scanstate, eflags);
 
 	return scanstate;
 }
