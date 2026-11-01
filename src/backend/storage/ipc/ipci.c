@@ -27,6 +27,7 @@
 #include "commands/async.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/autoindex.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/bgwriter.h"
@@ -156,6 +157,8 @@ CalculateShmemSize(int *num_semaphores)
 
 	/* might as well round it off to a multiple of a typical page size */
 	size = add_size(size, 8192 - (size % 8192));
+
+	size = add_size(size, AutoIndexShmemSize());
 
 	return size;
 }
@@ -345,6 +348,7 @@ CreateOrAttachShmemStructs(void)
 	WaitEventCustomShmemInit();
 	InjectionPointShmemInit();
 	AioShmemInit();
+	AutoIndexShmemInit();
 }
 
 /*

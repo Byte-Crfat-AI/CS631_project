@@ -21,6 +21,87 @@
 
 bool am_autoindex_worker = false;
 
+static AutoIndexShared *AutoIndexShmem = NULL;
+
+Size
+AutoIndexShmemSize(void)
+{
+    return sizeof(AutoIndexShared);
+}
+
+void
+AutoIndexShmemInit(void)
+{
+    bool found;
+
+    AutoIndexShmem = ShmemInitStruct("AutoIndex Data", sizeof(AutoIndexShared), &found);
+    if (!found)
+    {
+        memset(AutoIndexShmem, 0, sizeof(AutoIndexShared));   /* all slots AI_EMPTY */
+        SpinLockInit(&AutoIndexShmem->mutex);
+    }
+}
+
+/* caller holds mutex */
+static AutoIndexEntry *
+find_entry(Oid dbid, Oid relid, AttrNumber attnum, bool create)
+{
+    AutoIndexEntry *free_slot = NULL;
+
+    for (int i = 0; i < AUTOINDEX_MAX_ENTRIES; i++)
+    {
+        AutoIndexEntry *e = &AutoIndexShmem->entries[i];
+
+        if (e->state == AI_EMPTY)
+        {
+            if (free_slot == NULL)
+                free_slot = e;
+            continue;
+        }
+        if (e->dbid == dbid && e->relid == relid && e->attnum == attnum)
+            return e;
+    }
+    if (!create || free_slot == NULL)
+        return NULL;
+
+    memset(free_slot, 0, sizeof(AutoIndexEntry));
+    free_slot->state = AI_TRACKING;
+    free_slot->dbid = dbid;
+    free_slot->relid = relid;
+    free_slot->attnum = attnum;
+    return free_slot;
+}
+
+void
+autoindex_report_scan(SeqScanState *node)
+{
+    Relation        rel = node->ss.ss_currentRelation;
+    AutoIndexEntry *e;
+    AutoIndexEntry  copy;
+    bool            have = false;
+
+    SpinLockAcquire(&AutoIndexShmem->mutex);
+    e = find_entry(MyDatabaseId, RelationGetRelid(rel), node->ai_attno, true);
+    if (e != NULL)
+    {
+        e->nscans++;
+        e->tuples_examined += node->ai_examined;
+        e->tuples_matched  += node->ai_matched;
+        e->selectivity = e->tuples_examined > 0 ?
+            (double) e->tuples_matched / e->tuples_examined : 1.0;
+        copy = *e;
+        have = true;
+    }
+    SpinLockRelease(&AutoIndexShmem->mutex);
+
+    /* never elog while holding a spinlock: log from the copy */
+    if (have)
+        elog(DEBUG1, "autoindex: %s.%d scans=%lld examined=%lld matched=%lld sel=%.6f",
+             RelationGetRelationName(rel), copy.attnum,
+             (long long) copy.nscans, (long long) copy.tuples_examined,
+             (long long) copy.tuples_matched, copy.selectivity);
+}
+
 /* Is this qual "column = constant" on our table, with a btree '=' operator? */
 static bool
 match_equality_clause(Expr *clause, Index scanrelid, AttrNumber *attno)

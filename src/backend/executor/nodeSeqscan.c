@@ -80,7 +80,11 @@ SeqNext(SeqScanState *node)
 	 * get the next tuple from the table
 	 */
 	if (table_scan_getnextslot(scandesc, direction, slot))
-		return slot;
+	{
+        node->ai_examined++;
+        return slot;
+    }
+	node->ai_reached_end = true;
 	return NULL;
 }
 
@@ -131,17 +135,23 @@ static TupleTableSlot *
 ExecSeqScanWithQual(PlanState *pstate)
 {
 	SeqScanState *node = castNode(SeqScanState, pstate);
+	TupleTableSlot *slot;
 
 	Assert(pstate->state->es_epq_active == NULL);
 	Assert(pstate->qual != NULL);
 	Assert(pstate->ps_ProjInfo == NULL);
 
-	return ExecScanExtended(&node->ss,
+	slot = ExecScanExtended(&node->ss,
 							(ExecScanAccessMtd) SeqNext,
 							(ExecScanRecheckMtd) SeqRecheck,
 							NULL,
 							pstate->qual,
 							NULL);
+	
+	if (node->ai_active && !TupIsNull(slot))
+		node->ai_matched++;
+	
+	return slot;
 }
 
 /*
@@ -151,7 +161,6 @@ static TupleTableSlot *
 ExecSeqScanWithProject(PlanState *pstate)
 {
 	SeqScanState *node = castNode(SeqScanState, pstate);
-
 	Assert(pstate->state->es_epq_active == NULL);
 	Assert(pstate->qual == NULL);
 	Assert(pstate->ps_ProjInfo != NULL);
@@ -172,17 +181,23 @@ static TupleTableSlot *
 ExecSeqScanWithQualProject(PlanState *pstate)
 {
 	SeqScanState *node = castNode(SeqScanState, pstate);
-
+	TupleTableSlot *slot;
+	
 	Assert(pstate->state->es_epq_active == NULL);
 	Assert(pstate->qual != NULL);
 	Assert(pstate->ps_ProjInfo != NULL);
 
-	return ExecScanExtended(&node->ss,
+	slot = ExecScanExtended(&node->ss,
 							(ExecScanAccessMtd) SeqNext,
 							(ExecScanRecheckMtd) SeqRecheck,
 							NULL,
 							pstate->qual,
 							pstate->ps_ProjInfo);
+
+	if (node->ai_active && !TupIsNull(slot))
+		node->ai_matched++;
+	
+	return slot;
 }
 
 /*
@@ -296,6 +311,9 @@ ExecEndSeqScan(SeqScanState *node)
 	/*
 	 * get information from node
 	 */
+	if (node->ai_active && node->ai_reached_end)
+        autoindex_report_scan(node);
+
 	scanDesc = node->ss.ss_currentScanDesc;
 
 	/*
@@ -321,6 +339,11 @@ ExecReScanSeqScan(SeqScanState *node)
 {
 	TableScanDesc scan;
 
+	if (node->ai_active && node->ai_reached_end)
+        autoindex_report_scan(node);
+    node->ai_examined = node->ai_matched = 0;
+    node->ai_reached_end = false;
+	
 	scan = node->ss.ss_currentScanDesc;
 
 	if (scan != NULL)
