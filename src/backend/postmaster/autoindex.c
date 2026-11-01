@@ -18,6 +18,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "optimizer/optimizer.h"
 
 bool am_autoindex_worker = false;
 
@@ -75,33 +76,61 @@ find_entry(Oid dbid, Oid relid, AttrNumber attnum, bool create)
 void
 autoindex_report_scan(SeqScanState *node)
 {
-    Relation        rel = node->ss.ss_currentRelation;
-    AutoIndexEntry *e;
-    AutoIndexEntry  copy;
-    bool            have = false;
+	Relation	rel = node->ss.ss_currentRelation;
+	AutoIndexEntry *e;
+	AutoIndexEntry copy;
+	bool		have = false;
 
-    SpinLockAcquire(&AutoIndexShmem->mutex);
-    e = find_entry(MyDatabaseId, RelationGetRelid(rel), node->ai_attno, true);
-    if (e != NULL)
-    {
-        e->nscans++;
-        e->tuples_examined += node->ai_examined;
-        e->tuples_matched  += node->ai_matched;
-        e->selectivity = e->tuples_examined > 0 ?
-            (double) e->tuples_matched / e->tuples_examined : 1.0;
-        copy = *e;
-        have = true;
-    }
-    SpinLockRelease(&AutoIndexShmem->mutex);
+	/* costs are computed BEFORE taking the spinlock */
+	double		pages = (double) RelationGetNumberOfBlocks(rel);
+	double		examined = (double) node->ai_examined;
+	double		matched = (double) node->ai_matched;
 
-    /* never elog while holding a spinlock: log from the copy */
-    if (have)
-        elog(DEBUG1, "autoindex: %s.%d scans=%lld examined=%lld matched=%lld sel=%.6f",
-             RelationGetRelationName(rel), copy.attnum,
-             (long long) copy.nscans, (long long) copy.tuples_examined,
-             (long long) copy.tuples_matched, copy.selectivity);
+	/* what this seq scan cost (same ingredients as cost_seqscan) */
+	double		seq_cost = pages * seq_page_cost
+		+ examined * (cpu_tuple_cost + cpu_operator_cost);
+
+	/* what an index scan would have cost: ~3 page descent + 1 random page per match */
+	double		idx_cost = 3 * random_page_cost
+		+ matched * (random_page_cost + cpu_index_tuple_cost + cpu_tuple_cost);
+
+	double		benefit = Max(0.0, seq_cost - idx_cost);
+	double		build_cost = AUTOINDEX_BUILD_FACTOR *
+		(pages * seq_page_cost + examined * cpu_tuple_cost);
+
+	SpinLockAcquire(&AutoIndexShmem->mutex);
+	e = find_entry(MyDatabaseId, RelationGetRelid(rel), node->ai_attno, true);
+	if (e != NULL)
+	{
+		e->nscans++;
+		e->tuples_examined += node->ai_examined;
+		e->tuples_matched += node->ai_matched;
+		e->selectivity = e->tuples_examined > 0 ?
+			(double) e->tuples_matched / e->tuples_examined : 1.0;
+
+		e->total_seq_cost += seq_cost;
+		e->total_benefit += benefit;	/* = benefit per scan x scans */
+		e->build_cost = build_cost;
+
+		if (e->state == AI_TRACKING &&
+			e->nscans >= AUTOINDEX_MIN_SCANS &&
+			e->total_benefit > e->build_cost)
+			e->state = AI_READY;
+
+		copy = *e;
+		have = true;
+	}
+	SpinLockRelease(&AutoIndexShmem->mutex);
+
+	/* never elog while holding a spinlock: log from the copy */
+	if (have)
+		elog(DEBUG1, "autoindex: %s.%d scans=%lld examined=%lld matched=%lld sel=%.6f "
+			 "benefit=%.0f total_benefit=%.0f build_cost=%.0f state=%d",
+			 RelationGetRelationName(rel), copy.attnum,
+			 (long long) copy.nscans, (long long) copy.tuples_examined,
+			 (long long) copy.tuples_matched, copy.selectivity,
+			 benefit, copy.total_benefit, copy.build_cost, (int) copy.state);
 }
-
 /* Is this qual "column = constant" on our table, with a btree '=' operator? */
 static bool
 match_equality_clause(Expr *clause, Index scanrelid, AttrNumber *attno)
