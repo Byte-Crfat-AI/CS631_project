@@ -100,6 +100,7 @@
 #include "pg_getopt.h"
 #include "pgstat.h"
 #include "port/pg_bswap.h"
+#include "postmaster/autoindex.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/pgarch.h"
@@ -925,6 +926,8 @@ PostmasterMain(int argc, char *argv[])
 	 * before any modules had a chance to take the background worker slots.
 	 */
 	ApplyLauncherRegister();
+
+	AutoIndexWorkerRegister();
 
 	/*
 	 * process any libraries that should be preloaded at postmaster start

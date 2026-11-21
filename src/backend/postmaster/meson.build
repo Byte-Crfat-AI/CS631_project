@@ -2,6 +2,7 @@
 
 backend_sources += files(
   'autoindex.c',
+  'autoindex_worker.c',
   'autovacuum.c',
   'auxprocess.c',
   'bgworker.c',
