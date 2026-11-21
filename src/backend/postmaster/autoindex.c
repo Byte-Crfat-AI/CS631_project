@@ -73,6 +73,53 @@ find_entry(Oid dbid, Oid relid, AttrNumber attnum, bool create)
     return free_slot;
 }
 
+/* caller holds mutex */
+static bool
+enqueue_request(AutoIndexEntry *e)
+{
+	int			next = (AutoIndexShmem->tail + 1) % AUTOINDEX_QUEUE_SIZE;
+
+	if (next == AutoIndexShmem->head)
+		return false;			/* queue full: stay READY, retry on next scan */
+
+	AutoIndexShmem->queue[AutoIndexShmem->tail].dbid = e->dbid;
+	AutoIndexShmem->queue[AutoIndexShmem->tail].relid = e->relid;
+	AutoIndexShmem->queue[AutoIndexShmem->tail].attnum = e->attnum;
+	AutoIndexShmem->tail = next;
+	e->state = AI_QUEUED;
+	return true;
+}
+
+/* worker side: take the oldest request, if any */
+bool
+autoindex_pop_request(AutoIndexRequest *req)
+{
+	bool		found = false;
+
+	SpinLockAcquire(&AutoIndexShmem->mutex);
+	if (AutoIndexShmem->head != AutoIndexShmem->tail)
+	{
+		*req = AutoIndexShmem->queue[AutoIndexShmem->head];
+		AutoIndexShmem->head = (AutoIndexShmem->head + 1) % AUTOINDEX_QUEUE_SIZE;
+		found = true;
+	}
+	SpinLockRelease(&AutoIndexShmem->mutex);
+	return found;
+}
+
+/* worker side: record progress (BUILDING, DONE, FAILED) */
+void
+autoindex_mark(const AutoIndexRequest *req, AutoIndexState st)
+{
+	AutoIndexEntry *e;
+
+	SpinLockAcquire(&AutoIndexShmem->mutex);
+	e = find_entry(req->dbid, req->relid, req->attnum, false);
+	if (e != NULL)
+		e->state = st;
+	SpinLockRelease(&AutoIndexShmem->mutex);
+}
+
 void
 autoindex_report_scan(SeqScanState *node)
 {
@@ -116,7 +163,10 @@ autoindex_report_scan(SeqScanState *node)
 			e->nscans >= AUTOINDEX_MIN_SCANS &&
 			e->total_benefit > e->build_cost)
 			e->state = AI_READY;
-
+        
+        if (e->state == AI_READY)
+			enqueue_request(e);
+        
 		copy = *e;
 		have = true;
 	}
