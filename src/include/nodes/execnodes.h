@@ -703,6 +703,7 @@ typedef struct EState
 
 	/* Other working state: */
 	MemoryContext es_query_cxt; /* per-query context in which EState lives */
+	uint64		es_autoindex_execution_id; /* assigned at first candidate report */
 
 	List	   *es_tupleTable;	/* List of TupleTableSlots */
 

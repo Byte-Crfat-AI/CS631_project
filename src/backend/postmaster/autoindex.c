@@ -80,7 +80,7 @@ enqueue_request(AutoIndexEntry *e)
 	int			next = (AutoIndexShmem->tail + 1) % AUTOINDEX_QUEUE_SIZE;
 
 	if (next == AutoIndexShmem->head)
-		return false;			/* queue full: stay READY, retry on next scan */
+		return false;			/* queue full: stay armed for another execution */
 
 	AutoIndexShmem->queue[AutoIndexShmem->tail].dbid = e->dbid;
 	AutoIndexShmem->queue[AutoIndexShmem->tail].relid = e->relid;
@@ -124,6 +124,7 @@ void
 autoindex_report_scan(SeqScanState *node)
 {
 	Relation	rel = node->ss.ss_currentRelation;
+	EState	   *estate = node->ss.ps.state;
 	AutoIndexEntry *e;
 	AutoIndexEntry copy;
 	bool		have = false;
@@ -145,10 +146,17 @@ autoindex_report_scan(SeqScanState *node)
 	double		build_cost = AUTOINDEX_BUILD_FACTOR *
 		(pages * seq_page_cost + examined * cpu_tuple_cost);
 
+	/* An EvalPlanQual recheck belongs to the original execution. */
+	while (estate->es_epq_active != NULL)
+		estate = estate->es_epq_active->parentestate;
+
 	SpinLockAcquire(&AutoIndexShmem->mutex);
 	e = find_entry(MyDatabaseId, RelationGetRelid(rel), node->ai_attno, true);
 	if (e != NULL)
 	{
+		if (estate->es_autoindex_execution_id == 0)
+			estate->es_autoindex_execution_id = ++AutoIndexShmem->last_execution_id;
+
 		e->nscans++;
 		e->tuples_examined += node->ai_examined;
 		e->tuples_matched += node->ai_matched;
@@ -159,14 +167,24 @@ autoindex_report_scan(SeqScanState *node)
 		e->total_benefit += benefit;	/* = benefit per scan x scans */
 		e->build_cost = build_cost;
 
-		if (e->state == AI_TRACKING &&
-			e->nscans >= AUTOINDEX_MIN_SCANS &&
-			e->total_benefit > e->build_cost)
-			e->state = AI_READY;
-        
-        if (e->state == AI_READY)
-			enqueue_request(e);
-        
+		switch (e->state)
+		{
+			case AI_TRACKING:
+				if (e->nscans >= AUTOINDEX_MIN_SCANS &&
+					e->total_benefit > e->build_cost)
+				{
+					e->state = AI_ARMED;
+					e->armed_by = estate->es_autoindex_execution_id;
+				}
+				break;
+			case AI_ARMED:
+				if (e->armed_by != estate->es_autoindex_execution_id)
+					enqueue_request(e);
+				break;
+			default:
+				break;
+		}
+
 		copy = *e;
 		have = true;
 	}

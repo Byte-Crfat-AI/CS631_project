@@ -14,7 +14,7 @@ typedef enum AutoIndexState
 {
     AI_EMPTY = 0,       /* unused slot (memset 0 gives this) */
     AI_TRACKING,
-    AI_READY,
+	AI_ARMED,
     AI_QUEUED,
     AI_BUILDING,
     AI_DONE,
@@ -27,6 +27,7 @@ typedef struct AutoIndexEntry
     Oid         dbid;
     Oid         relid;
     AttrNumber  attnum;
+	uint64		armed_by;		/* execution that crossed the threshold */
     int64       nscans;
     int64       tuples_examined;
     int64       tuples_matched;
@@ -46,6 +47,7 @@ typedef struct AutoIndexRequest
 typedef struct AutoIndexShared
 {
     slock_t          mutex;
+	uint64		last_execution_id;
     AutoIndexEntry   entries[AUTOINDEX_MAX_ENTRIES];
     int              head;
     int              tail;
